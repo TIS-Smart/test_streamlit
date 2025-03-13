@@ -19,7 +19,7 @@
 import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@0.80.1/build/stlite.js"
 mount(
   {
-    requirements: [],
+    requirements: [osmnx, networkx, pandas, geopandas, streamlit, geopy.distance, folium, streamlit_folium, folium.plugins],
     entrypoint: "Map_visualization.py",
     files: {
 "Map_visualization.py": `import osmnx as ox
