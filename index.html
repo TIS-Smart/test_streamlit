@@ -20,11 +20,198 @@ import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@0.80.1/build
 mount(
   {
     requirements: [],
-    entrypoint: "streamlit_app.py",
+    entrypoint: "Map_visualization.py",
     files: {
-"streamlit_app.py": `import streamlit as st
+"Map_visualization.py": `import osmnx as ox
+import networkx as nx
+import pandas as pd
+import geopandas as gpd
+import streamlit as st
+from geopy.distance import geodesic
+import folium
+from streamlit_folium import st_folium
+from folium.plugins import MarkerCluster
 
-st.title("Hello World!")
+
+
+# Function to load data
+@st.cache_data
+def load_crash_data():
+    data = pd.read_csv('Filtered_Crashes.csv')
+    return data
+
+@st.cache_data
+def load_hospital_data():
+    data = pd.read_csv('filtered_hospitals.csv')
+    return data
+
+@st.cache_data
+def load_county_data():
+    data = pd.read_csv(r'Merged_ACCIDENTS.csv', usecols=['ACCIDENT_KEY', 'COUNTY_NBR'])
+    return data
+
+@st.cache_data
+def load_ems_data(shapefile_path):
+    # Read the shapefile
+    gdf = gpd.read_file('EMS_Stations_2008.shp')
+
+    # Convert the GeoDataFrame to a Pandas DataFrame
+    gdf['latitude'] = gdf.geometry.y
+    gdf['longitude'] = gdf.geometry.x
+    df = pd.DataFrame(gdf.drop(columns='geometry'))
+
+    return df
+
+crashes = load_crash_data()
+hospitals = load_hospital_data()
+county = load_county_data()
+ems_data = load_ems_data('EMS_Stations_2008.shp')
+
+
+# Merge crash data with county data
+merged_data = pd.merge(crashes, county, on='ACCIDENT_KEY')
+
+# Preprocess data to create a dictionary of crash data for each county
+county_crash_data_dict = {}
+for county_nbr in merged_data['COUNTY_NBR'].unique():
+    county_data = merged_data[merged_data['COUNTY_NBR'] == county_nbr]
+    county_crash_data_dict[county_nbr] = county_data
+
+# User input for county selection
+selected_county = st.selectbox("Select a County", list(county_crash_data_dict.keys()))
+
+# Access the crash data for the selected county from the dictionary
+selected_county_data = county_crash_data_dict[selected_county]
+
+# Streamlit App UI
+st.title("Kansas Crash & Hospital Data Visualization")
+
+# Map layers checkboxes
+st.subheader("Map Layers")
+show_crashes = st.checkbox("Crash Locations", value=True)
+show_hospitals = st.checkbox("Hospital Locations", value=True)
+
+
+# Function definitions
+def get_nearest_node(lat, lon, graph):
+    return ox.distance.nearest_nodes(graph, lon, lat)
+
+def calculate_shortest_path(graph, source, target):
+    try:
+        return nx.shortest_path(graph, source, target, weight='length')
+    except nx.NetworkXNoPath:
+        return None
+
+def get_nearby_hospitals(lat, lon, hospitals_df, radius):
+    nearby_hospitals = []
+    for index, row in hospitals_df.iterrows():
+        hospital_lat, hospital_lon = row['LATITUDE'], row['LONGITUDE']
+        distance = geodesic((lat, lon), (hospital_lat, hospital_lon)).km
+        if distance <= radius:
+            nearby_hospitals.append((hospital_lat, hospital_lon, row['NAME']))
+    return nearby_hospitals
+
+# Input for radius
+radius = st.number_input('Enter search radius in miles:', value=50)
+
+# Load the graph for driving routes
+graph = ox.graph_from_point((selected_county_data['Flag_Latitude'].mean(), selected_county_data['Flag_Longitude'].mean()), dist=50000, network_type='drive')
+
+# Create map
+m = folium.Map(location=[38.4987789, -98.3200779], zoom_start=6)
+
+# Text input for user to enter the Accident Key
+input_accident_key = st.text_input("Enter the Accident Key for a Crash Location", "")
+
+
+
+# Function to convert graph node to latitude and longitude
+def node_to_lat_lon(node, graph):
+    return graph.nodes[node]['y'], graph.nodes[node]['x']
+# Add crash points for the selected county
+if show_crashes:
+    marker_cluster = MarkerCluster().add_to(m)  # Create a marker cluster
+    # Calculate shortest paths for each crash location in the selected county
+    #for index, row in selected_county_data.head(100).iterrows():
+    if input_accident_key:
+        # Convert input to the correct type, e.g., int if ACCIDENT_KEY is an integer
+        try:
+            input_accident_key = int(input_accident_key)  # or float, as required
+        except ValueError:
+            st.warning("Invalid Accident Key format. Please enter a valid key.")
+            input_accident_key = None
+    if input_accident_key:
+        selected_crash = selected_county_data[selected_county_data['ACCIDENT_KEY'] == input_accident_key]
+        if not selected_crash.empty:
+            # 'Flag_Latitude' and 'Flag_Longitude' are the columns for location
+            crash_lat = selected_crash.iloc[0]['Flag_Latitude']
+            crash_lon = selected_crash.iloc[0]['Flag_Longitude']
+           
+            
+
+        #if input_accident_key and not selected_crash.empty:
+        #crash_lat, crash_lon = row['Flag_Latitude'], row['Flag_Longitude']
+            source_node = get_nearest_node(crash_lat, crash_lon, graph)
+            nearby_hospitals = get_nearby_hospitals(crash_lat, crash_lon, hospitals, radius)
+            
+            # Initialize variables to track the shortest path
+            shortest_path = None
+            shortest_path_length = float('inf')
+
+            # Add crash location to map
+            folium.Marker(
+                location=[crash_lat, crash_lon],
+                popup=f"Rural Status: {selected_crash.iloc[0]['UAB_Class']}<br>Accident key: {selected_crash.iloc[0]['ACCIDENT_KEY']}",
+                icon=folium.Icon(color="red", icon="car"),
+            ).add_to(marker_cluster)  # Add marker to cluster instead of map
+
+            for hospital_lat, hospital_lon, hospital_name in nearby_hospitals:
+                hospital_node = get_nearest_node(hospital_lat, hospital_lon, graph)
+                path = calculate_shortest_path(graph, source_node, hospital_node)
+                if path is not None:
+                    path_length = sum(ox.utils_graph.get_route_edge_attributes(graph, path, 'length'))
+                if path_length < shortest_path_length:
+                    shortest_path_length = path_length
+                    shortest_path = path
+            if shortest_path is not None:
+                path_coords = [node_to_lat_lon(node, graph) for node in shortest_path]
+                folium.PolyLine(path_coords, color="blue").add_to(m)
+                
+        else:
+            st.warning("No crash found for the entered Accident Key.")    
+    else:
+    # If no specific accident key is entered, display all crashes
+        for index, row in selected_county_data.iterrows():
+            crash_lat, crash_lon = row['Flag_Latitude'], row['Flag_Longitude']
+
+            folium.Marker(
+                location=[crash_lat, crash_lon],
+                popup=f"Rural Status: {row['UAB_Class']}<br>Accident key: {row['ACCIDENT_KEY']}",
+                icon=folium.Icon(color="red", icon="car"),
+            ).add_to(marker_cluster)
+
+# Add hospitals to map
+if show_hospitals:
+    for index, row in hospitals.iterrows():
+        folium.Marker(
+            location=[row['LATITUDE'], row['LONGITUDE']],
+            popup=f"Name: {row['NAME']}<br>Trauma Level: {row['TRAUMA']}",
+            icon=folium.Icon(color="green", icon="plus"),
+        ).add_to(m)
+
+show_ems = st.checkbox("EMS Locations", value=True)
+
+if show_ems:
+    for index, row in ems_data.iterrows():
+        folium.Marker(
+            location=[row['latitude'], row['longitude']],
+            #popup=f"EMS Name: {row['Name']}",  # Replace 'Name' with the actual column name
+            icon=folium.Icon(color="blue", icon="ambulance", prefix='fa'),  
+        ).add_to(m)
+
+
+# Show map
+st_folium(m)
 `,
 
 },
